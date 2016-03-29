@@ -21,6 +21,7 @@ from twisted.internet.protocol import Protocol
 from twisted.web.client import Agent
 from twisted.internet.ssl import ClientContextFactory
 from twisted.web.http_headers import Headers
+from ntlm import ntlm
 from . import constants as c
 
 from .krb5 import kinit, ccname
@@ -53,6 +54,9 @@ OriginalContent: type=application/soap+xml;charset=UTF-8;Length={original_length
 Content-Type: application/octet-stream
 {emsg}--Encrypted Boundary
 """
+_NEGOTIATE_HEADER = 'Negotiate'
+
+
 def _has_get_attr(obj, attr_name):
     attr_value = getattr(obj, attr_name, _MARKER)
     if attr_value is _MARKER:
@@ -328,6 +332,45 @@ def get_auth_details(auth_header=''):
     return auth_details
 
 @defer.inlineCallbacks
+def _authenticate_with_ntlm(conn_info, url, agent):
+    log.info('authenticate to url %s with credentials: %s' % (url, conn_info))
+    if '@' in conn_info.username:
+        username, domain = conn_info.username.split('@')
+    elif '\\' in conn_info.username:
+        domain, username = conn_info.username.split('\\')
+    else:
+        log.debug('no domain info found in username %s, assuming local username' % conn_info.username)
+        domain = '.'
+        username = conn_info.username
+    sam_account_name = "%s\\%s" % (domain, username)
+    auth = str('%s %s' % (_NEGOTIATE_HEADER, ntlm.create_NTLM_NEGOTIATE_MESSAGE(sam_account_name).decode('ascii')))
+    ntlm_headers = Headers(_CONTENT_TYPE)
+    ntlm_headers.addRawHeader('Content-Length', '0')
+    ntlm_headers.addRawHeader('Connection', 'Keep-Alive')
+    ntlm_headers.addRawHeader('Authorization', auth)
+    log.debug('posting a negotiate message to url %s with ntlm headers %s' % (url, ntlm_headers))
+    response = yield agent.request('POST', url, ntlm_headers, None)
+    log.debug('request challenge response code: %s, headers: %s' % (response.code, response.headers))
+    auth = response.headers.getRawHeaders('WWW-Authenticate')
+    if response.code == httplib.OK:
+        log.warning('challenge request returned http status code 200 (ok), returning the current authenticate'
+                    'header')
+    else:
+        ntlm_header_value = list(filter(lambda s: s.startswith('%s ' % _NEGOTIATE_HEADER), auth))
+        if not ntlm_header_value:
+            log.warning('no negotiate header found in authenticate header, cannot authenticate challenge message')
+        else:
+            ntlm_header_value = ntlm_header_value[0].strip()
+            server_challenge, negotiate_flags = ntlm.parse_NTLM_CHALLENGE_MESSAGE(
+                    ntlm_header_value[len('%s ' % _NEGOTIATE_HEADER):])
+            log.debug('server challenge: %s, negotiate flags: %s' % (server_challenge, negotiate_flags))
+            auth = str('%s %s' % (_NEGOTIATE_HEADER, ntlm.create_NTLM_AUTHENTICATE_MESSAGE(
+                    server_challenge, username, domain, conn_info.password, negotiate_flags).decode('ascii')))
+            log.debug('final authorization header %s' % str(auth))
+    defer.returnValue(auth)
+
+
+@defer.inlineCallbacks
 def _authenticate_with_kerberos(conn_info, url, agent, gss_client=None):
     service = '{0}@{1}'.format(conn_info.scheme.upper(), conn_info.hostname)
     if gss_client is None:
@@ -399,7 +442,7 @@ def verify_hostname(conn_info):
 
 def verify_auth_type(conn_info):
     has_auth_type, auth_type = _has_get_attr(conn_info, 'auth_type')
-    if not has_auth_type or auth_type not in ('basic', 'kerberos'):
+    if not has_auth_type or auth_type not in ('basic', 'kerberos', 'ntlm'):
         raise Exception(
             "auth_type must be basic or kerberos: {0}".format(auth_type))
 
@@ -474,6 +517,12 @@ class RequestSender(object):
                 headers.addRawHeader(
                     'Authorization', _get_basic_auth_header(self._conn_info))
                 self.authorized = True
+        elif self._conn_info.auth_type == 'ntlm':
+            headers = Headers(_CONTENT_TYPE)
+            headers.addRawHeader('Connection', self._conn_info.connectiontype)
+            auth = yield _authenticate_with_ntlm(self._conn_info, url, self.agent)
+            headers.addRawHeader('Authorization', auth)
+            self.authorized = True
         elif self.is_kerberos():
             headers = Headers(_ENCRYPTED_CONTENT_TYPE)
             headers.addRawHeader('Connection', self._conn_info.connectiontype)
@@ -535,6 +584,13 @@ class RequestSender(object):
                         'POST', self._url, self._headers, body_producer)
                 except Exception as e:
                     raise e
+            elif self._conn_info.auth_type == 'ntlm':
+                log.debug('re-authenticate ntlm with url %s, connection info %s' % (self._url, self._conn_info))
+                # re-authenticate ntlm
+                auth = yield _authenticate_with_ntlm(self._conn_info, self._url, self.agent)
+                # set the new ntlm authorization header
+                self._headers.setRawHeaders('Authorization', [auth])
+                response = yield self.agent.request('POST', self._url, self._headers, body_producer)
             if response.code == httplib.UNAUTHORIZED:
                 if self.is_kerberos():
                     auth_header = response.headers.getRawHeaders('WWW-Authenticate')[0]

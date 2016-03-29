@@ -29,7 +29,7 @@ setup_kwargs = dict(
 
 try:
     from setuptools import setup
-    setup_kwargs['install_requires'] = ['twisted', 'kerberos', 'pyOpenSSL']
+    setup_kwargs['install_requires'] = ['twisted', 'kerberos', 'pyOpenSSL', 'python-ntlm']
     try:
         import argparse
         if False:
