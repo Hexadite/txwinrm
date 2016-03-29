@@ -584,7 +584,7 @@ class RequestSender(object):
                         'POST', self._url, self._headers, body_producer)
                 except Exception as e:
                     raise e
-            else:
+            elif self._conn_info.auth_type == 'ntlm':
                 log.debug('re-authenticate ntlm with url %s, connection info %s' % (self._url, self._conn_info))
                 # re-authenticate ntlm
                 auth = yield _authenticate_with_ntlm(self._conn_info, self._url, self.agent)
