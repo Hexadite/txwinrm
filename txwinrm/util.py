@@ -333,7 +333,7 @@ def get_auth_details(auth_header=''):
 
 @defer.inlineCallbacks
 def _authenticate_with_ntlm(conn_info, url, agent):
-    log.info('authenticate to url %s with credentials: %s' % (url, conn_info))
+    log.info('ntlm authenticate to url %s with user: %s' % (url, conn_info.username))
     if '@' in conn_info.username:
         username, domain = conn_info.username.split('@')
     elif '\\' in conn_info.username:
