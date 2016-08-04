@@ -585,7 +585,7 @@ class RequestSender(object):
                 except Exception as e:
                     raise e
             elif self._conn_info.auth_type == 'ntlm':
-                log.debug('re-authenticate ntlm with url %s, connection info %s' % (self._url, self._conn_info))
+                log.debug('re-authenticate ntlm with url %s, user %s' % (self._url, self._conn_info.username))
                 # re-authenticate ntlm
                 auth = yield _authenticate_with_ntlm(self._conn_info, self._url, self.agent)
                 # set the new ntlm authorization header
