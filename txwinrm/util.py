@@ -21,7 +21,8 @@ from twisted.internet.protocol import Protocol
 from twisted.web.client import Agent
 from twisted.internet.ssl import ClientContextFactory
 from twisted.web.http_headers import Headers
-from ntlm import ntlm
+from ntlmlib.context import NtlmContext
+from ntlmlib.authentication import PasswordAuthentication
 from . import constants as c
 
 from .krb5 import kinit, ccname
@@ -342,8 +343,16 @@ def _authenticate_with_ntlm(conn_info, url, agent):
         log.debug('no domain info found in username %s, assuming local username' % conn_info.username)
         domain = '.'
         username = conn_info.username
-    sam_account_name = "%s\\%s" % (domain, username)
-    auth = str('%s %s' % (_NEGOTIATE_HEADER, ntlm.create_NTLM_NEGOTIATE_MESSAGE(sam_account_name).decode('ascii')))
+    log.debug('using ntlmv%s' % '2' if conn_info.force_ntlm_v2 else '1')
+    auth = PasswordAuthentication(domain, username, conn_info.password,
+                                  compatibility=3 if conn_info.force_ntlm_v2 else 1)
+    ntlm_context = NtlmContext(auth)
+    # Generate the initial negotiate token
+    context = ntlm_context.initialize_security_context()
+    negotiate = context.send(None)
+    negotiate_b64 = base64.encodestring(negotiate).replace('\n', '')
+
+    auth = str('%s %s' % (_NEGOTIATE_HEADER, negotiate_b64))
     ntlm_headers = Headers(_CONTENT_TYPE)
     ntlm_headers.addRawHeader('Content-Length', '0')
     ntlm_headers.addRawHeader('Connection', 'Keep-Alive')
@@ -356,16 +365,15 @@ def _authenticate_with_ntlm(conn_info, url, agent):
         log.warning('challenge request returned http status code 200 (ok), returning the current authenticate'
                     'header')
     else:
-        ntlm_header_value = list(filter(lambda s: s.startswith('%s ' % _NEGOTIATE_HEADER), auth))
-        if not ntlm_header_value:
+        negotiate_header = '%s ' % _NEGOTIATE_HEADER
+        challenge = [h[len(negotiate_header):].strip() for h in auth if negotiate_header in h]
+        if not challenge:
             log.warning('no negotiate header found in authenticate header, cannot authenticate challenge message')
         else:
-            ntlm_header_value = ntlm_header_value[0].strip()
-            server_challenge, negotiate_flags = ntlm.parse_NTLM_CHALLENGE_MESSAGE(
-                    ntlm_header_value[len('%s ' % _NEGOTIATE_HEADER):])
-            log.debug('server challenge: %s, negotiate flags: %s' % (server_challenge, negotiate_flags))
-            auth = str('%s %s' % (_NEGOTIATE_HEADER, ntlm.create_NTLM_AUTHENTICATE_MESSAGE(
-                    server_challenge, username, domain, conn_info.password, negotiate_flags).decode('ascii')))
+            # we should have a single challenge
+            challenge_decoded = base64.decodestring(challenge[0])
+            authenticate_challenge = context.send(challenge_decoded)
+            auth = '%s %s' % (_NEGOTIATE_HEADER, base64.encodestring(authenticate_challenge).replace('\n', ''))
             log.debug('final authorization header %s' % str(auth))
     defer.returnValue(auth)
 
@@ -430,9 +438,11 @@ class ConnectionInfo(namedtuple(
         'connectiontype',
         'keytab',
         'dcip',
-        'timeout'])):
-    def __new__(cls, hostname, auth_type, username, password, scheme, port, connectiontype, keytab, dcip, timeout=60):
-        return super(ConnectionInfo, cls).__new__(cls, hostname, auth_type, username, password, scheme, port, connectiontype, keytab, dcip, timeout)
+        'timeout',
+        'force_ntlm_v2'])):
+    def __new__(cls, hostname, auth_type, username, password, scheme, port, connectiontype, keytab, dcip, timeout=60, force_ntlm_v2=True):
+        return super(ConnectionInfo, cls).__new__(cls, hostname, auth_type, username, password, scheme, port, connectiontype, keytab, dcip, timeout, force_ntlm_v2)
+
 
 def verify_hostname(conn_info):
     has_hostname, hostname = _has_get_attr(conn_info, 'hostname')
