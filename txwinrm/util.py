@@ -325,10 +325,13 @@ class AuthGSSClient(object):
 def get_auth_details(auth_header=''):
     auth_details = ''
     for field in auth_header.split(','):
-        kind, details = field.strip().split(' ', 1)
-        if kind.lower() == 'kerberos':
-            auth_details = details.strip()
-            break
+        try:
+            kind, details = field.strip().split(' ', 1)
+            if kind.lower() == 'kerberos':
+                auth_details = details.strip()
+                break
+        except ValueError:
+            continue
     return auth_details
 
 @defer.inlineCallbacks
